@@ -1,0 +1,7 @@
+# 统一换行符，避免 Windows 上提交的 CRLF 让 diff/构建产物在不同平台漂移。
+* text=auto eol=lf
+
+# 这两个平台相关，保持原样。
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
