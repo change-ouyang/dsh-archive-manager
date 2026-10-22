@@ -1,4 +1,3 @@
-import { defineTool } from "@deepseek-ai/dsh-tools";
 import { rm, readFile, readdir, stat, writeFile, rename } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
@@ -225,17 +224,67 @@ function registerPanel(ctx, config = {}) {
     "dsh-archive-manager: api routes"
   );
 }
-const name = "dsh-archive-manager";
-const inject = ["tools"];
-const DEFAULT_MAX_ITEMS = 500;
 const TEXT_OUTPUT = {
   schema: { type: "string" },
   render: (_args, value) => [{ type: "text", text: value }]
 };
+function paramsToJsonSchema(spec) {
+  const properties = {};
+  const required = [];
+  for (const [key, def] of Object.entries(spec)) {
+    properties[key] = {
+      type: def.type,
+      ...def.description === void 0 ? {} : { description: def.description }
+    };
+    if (def.required === true) required.push(key);
+  }
+  return {
+    type: "object",
+    properties,
+    ...required.length === 0 ? {} : { required }
+  };
+}
+function validateArgs(spec, args) {
+  const value = args ?? {};
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("invalid arguments: 参数必须是对象");
+  }
+  const violations = [];
+  for (const [key, def] of Object.entries(spec)) {
+    const actual = value[key];
+    if (actual === void 0 || actual === null) {
+      if (def.required === true) violations.push(`${key}: 必填参数缺失`);
+      continue;
+    }
+    if (def.type === "string" && typeof actual !== "string") {
+      violations.push(`${key}: 期望 string，实际 ${typeof actual}`);
+    }
+  }
+  if (violations.length > 0) throw new Error(`invalid arguments: ${violations.join("; ")}`);
+}
+function defineTool(options) {
+  const parameters = paramsToJsonSchema(options.parameters);
+  return {
+    name: options.name,
+    description: options.description,
+    parameters,
+    output: {
+      schema: options.output.schema,
+      render: options.output.render
+    },
+    ...options.isConcurrencySafe === void 0 ? {} : { isConcurrencySafe: options.isConcurrencySafe },
+    async execute(args) {
+      validateArgs(options.parameters, args);
+      return options.execute(args);
+    }
+  };
+}
+const name = "dsh-archive-manager";
+const inject = ["tools"];
+const DEFAULT_MAX_ITEMS = 500;
 function apply(ctx, config = {}) {
   const maxItems = config.maxItems ?? DEFAULT_MAX_ITEMS;
-  const host = ctx;
-  host.inject(["webServer"], (ready) => {
+  ctx.inject(["webServer"], (ready) => {
     try {
       registerPanel(ready, { maxItems });
     } catch (err) {

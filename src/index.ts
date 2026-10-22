@@ -11,16 +11,16 @@
  * @module dsh-archive-manager
  */
 
-import type { Context } from '@deepseek-ai/cordis'
-import { defineTool } from '@deepseek-ai/dsh-tools'
 import { formatBytes, listArchived, remove, unarchive } from './archive'
 import { registerPanel } from './panel'
+// 自实现的 defineTool —— 不依赖 @deepseek-ai/dsh-tools，理由见 tool-kit.ts 顶部。
+import { TEXT_OUTPUT, defineTool } from './tool-kit'
 
 export const name = 'dsh-archive-manager'
 
 /**
- * `tools` 是本插件自带依赖提供的服务（宿主 asar 里没有 dsh-tools），
- * 三个工具必须等它就绪才能注册；设置分区不依赖它，缺席时只是少一个页面。
+ * `tools` 是 DSH 宿主提供的服务；三个工具必须等它就绪才能注册。
+ * 设置分区不依赖它，缺席时只是少一个页面。
  */
 export const inject = ['tools']
 
@@ -31,22 +31,24 @@ export interface Config {
 
 const DEFAULT_MAX_ITEMS = 500
 
-const TEXT_OUTPUT = {
-  schema: { type: 'string' as const },
-  render: (_args: unknown, value: string) => [{ type: 'text' as const, text: value }],
+/**
+ * 宿主侧可用的 cordis Context 子集。
+ *
+ * 刻意不 `import type { Context }`：那会把 @deepseek-ai/cordis 写进类型依赖，
+ * 而它同样是 DSH 内部包，克隆后 `tsc` 会因为找不到声明而失败。
+ * 这里只声明本插件真正用到的两个成员，运行时由宿主注入。
+ */
+interface HostContext {
+  inject: (deps: string[], callback: (ready: Record<string, unknown>) => void) => void
+  tools: { register: (definition: unknown) => unknown }
 }
 
 /** 注册三个归档维护工具，并挂载设置分区所需的同源 API。 */
-export function apply(ctx: Context, config: Config = {}): void {
+export function apply(ctx: HostContext, config: Config = {}): void {
   const maxItems = config.maxItems ?? DEFAULT_MAX_ITEMS
 
-  // webServer 不在 cordis 的 Context 静态类型里，但运行时存在；显式放宽。
-  const host = ctx as unknown as {
-    inject: (deps: string[], callback: (ready: Record<string, unknown>) => void) => void
-  }
-
   // 设置分区的数据接口等 webServer 就绪；失败不影响工具本身。
-  host.inject(['webServer'], (ready) => {
+  ctx.inject(['webServer'], (ready) => {
     try {
       registerPanel(ready, { maxItems })
     } catch (err) {

@@ -40,8 +40,12 @@
     "typecheck": "tsc --noEmit && tsc -p tsconfig.client.json --noEmit"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.0.0",
-    "@deepseek-ai/dsh-tools": "*"
+    "@deepseek-ai/cordis": "^4.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/node": "^26.6.4",

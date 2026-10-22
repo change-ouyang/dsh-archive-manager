@@ -72,10 +72,23 @@ npm run typecheck     # 宿主与浏览器两套 tsconfig 都检查
 
 仓库里 `dist/` 是**已构建**的产物，克隆后可直接装进 DSH 使用，不装依赖也能跑。
 
+### 零运行时依赖
+
+宿主半身只 `import` Node 内置模块，**不依赖任何 `@deepseek-ai/*` 包**：
+
+- `ctx.tools.register()` 要的工具定义形状很朴素
+  （`{ name, description, parameters, output: { schema, render }, execute }`），
+  本仓库在 `src/tool-kit.ts` 里自己实现了 `defineTool` 的等价物，
+  不引入 `@deepseek-ai/dsh-tools` —— 那个包是 DSH 内部包，不在公共 npm 上
+  与宿主版本对齐，作为 `peerDependencies` 又不会被 `npm install` 装上，
+  会导致克隆后宿主侧直接 `ERR_MODULE_NOT_FOUND`、三个工具全部失效；
+- 也没有 `import type { Context } from '@deepseek-ai/cordis'`，
+  改为在 `src/index.ts` 里声明用到的那一小部分成员，
+  这样 `tsc` 不需要任何内部包的声明文件。
+
 构建要点（`vite.config.ts` 里有注释）：
 
-- 宿主侧用 lib 模式输出 ESM，`node:*` 与 `@deepseek-ai/*` 全部外部化 ——
-  它们由 DSH 进程或 Node 提供，打进产物会出问题；
+- 宿主侧用 lib 模式输出 ESM，`node:*` 外部化 —— 由 Node 提供；
 - 浏览器半身必须输出 **IIFE**（无 `import`/`export`）：它是手写的
   `window.__ModuleLoader__.load({...})` 包，出现 ESM 语法会被 ModuleLoader 拒绝；
 - `react` **不作为依赖声明**：由 ModuleLoader 在运行时注入，声明了反而会
