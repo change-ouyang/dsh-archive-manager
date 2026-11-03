@@ -1,12 +1,17 @@
 # dsh-archive-manager
 
-管理 DeepSeek Harness（DSH）归档会话的插件 + 设置页：列出、取消归档、彻底删除。
+管理 DeepSeek Harness（DSH）归档会话的插件 + 设置页：列出、取消归档、彻底删除；支持勾选 + 全选批量恢复 / 批量删除（带逐条进度，单条失败不阻断批次）。
 
-DSH 的「归档」是 `~/.dsh/storages/workspace.json` 中 `global.archivedSessionIds` 的一个 ID 集合，
-不移动、不删除任何会话文件——只是让界面把它们隐藏起来。因此本插件直接操作该存储：
+DSH 的「归档」是 `~/.dsh/storages/workspace.json` 中 `global.archivedSessionIds` 的一个 ID 集合，不移动、不删除任何会话文件——只是让界面把它们隐藏起来。
 
-- **取消归档** = 从 `archivedSessionIds` 移除该 ID，会话回到列表原位置（文件不动）
-- **彻底删除** = 摘除归档标记与工作区引用，再删除磁盘上的会话目录
+## 两条写入路径
+
+运行中的 DSH 宿主把 workspace 状态**整个读进内存**（启动时读一次，之后内存权威、不再重读文件，也没有跨进程变更推送），直接改 `workspace.json` 只有重启后才被看见，且宿主下一次工作区写入会把内存状态整份写回，覆盖掉外部改动。因此本插件按可用性分两条路：
+
+- **官方路径（默认）**：宿主的 `workspaceRegistry` 服务就绪后接入——取消归档调 `workspaceRegistry.unarchiveSession(id)`（幂等），删除复用 `unarchiveSession` + 各工作区实体的 `detachSession(id)`（幂等）摘掉记账槽；这条路写通内存、落盘和 GUI 投影事件，**还原立即在侧栏生效**，无需重启。
+- **直写回退**：`workspaceRegistry` 不可用（老版宿主）时退回直写 `workspace.json`，写入采用「先写临时文件再改名」的原子方式；此时取消归档 / 删除**要重启 DSH 才生效**，且重启前避免任何归档 / 置顶 / 重命名 / 排序操作，否则改动会被宿主写回覆盖。
+
+> 早期版本认为 DSH 只暴露 `archiveSession`、没有 unarchive API，是对编译产物的过时结论；`@deepseek-ai/dsh-api-workspace-controller` 明确提供 `unarchiveSession`（Remote `workspace/unarchiveSession`），内置侧栏的「取消归档」按钮走的就是它。
 
 ## 功能
 

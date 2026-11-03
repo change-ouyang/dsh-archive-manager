@@ -1,10 +1,14 @@
-import { rm, readFile, readdir, stat, writeFile, rename } from "node:fs/promises";
+import { rm, readdir, stat, readFile, writeFile, rename } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 const SESSIONS_ROOT = join(homedir(), ".dsh", "sessions");
 const WORKSPACE_STORE = join(homedir(), ".dsh", "storages", "workspace.json");
 const TITLE_CACHE = join(homedir(), ".dsh", "storages", "session_projcache", "sessions");
+let registry = null;
+function setWorkspaceRegistry(value) {
+  registry = value;
+}
 async function readStore() {
   if (!existsSync(WORKSPACE_STORE)) throw new Error(`找不到 workspace 存储：${WORKSPACE_STORE}`);
   const raw = await readFile(WORKSPACE_STORE, "utf8");
@@ -111,17 +115,36 @@ async function listArchived(maxItems) {
   return out;
 }
 async function unarchive(sessionId) {
+  if (registry !== null) {
+    if (!registry.archivedSessionIds.includes(sessionId)) {
+      return { ok: false, message: `会话 ${sessionId} 不在归档集合中` };
+    }
+    await registry.unarchiveSession(sessionId);
+    return { ok: true, message: `已取消归档 ${sessionId}；侧栏会话列表即时生效` };
+  }
   const store = await readStore();
   if (!store.global.archivedSessionIds.includes(sessionId)) {
     return { ok: false, message: `会话 ${sessionId} 不在归档集合中` };
   }
   store.global.archivedSessionIds = store.global.archivedSessionIds.filter((id) => id !== sessionId);
   await writeStore(store);
-  return { ok: true, message: `已取消归档 ${sessionId}；会话文件未被改动` };
+  return { ok: true, message: `已取消归档 ${sessionId}（直写存储，重启 DSH 后生效）；会话文件未被改动` };
 }
 async function remove(sessionId) {
-  const store = await readStore();
   const { dir } = await locate(sessionId);
+  if (registry !== null) {
+    if (!registry.archivedSessionIds.includes(sessionId) && dir === null) {
+      return { ok: false, message: `会话 ${sessionId} 既不在归档集合中，磁盘上也没有它的目录` };
+    }
+    await registry.unarchiveSession(sessionId);
+    for (const entity of registry.list()) await entity.detachSession(sessionId);
+    if (dir !== null) await rm(dir, { recursive: true, force: true });
+    return {
+      ok: true,
+      message: `已彻底删除 ${sessionId}（归档标记、工作区引用${dir === null ? "" : "、磁盘目录"}）`
+    };
+  }
+  const store = await readStore();
   const archived = store.global.archivedSessionIds.includes(sessionId);
   if (!archived && dir === null) {
     return { ok: false, message: `会话 ${sessionId} 既不在归档集合中，磁盘上也没有它的目录` };
@@ -134,7 +157,7 @@ async function remove(sessionId) {
   if (dir !== null) await rm(dir, { recursive: true, force: true });
   return {
     ok: true,
-    message: `已彻底删除 ${sessionId}（归档标记、工作区引用${dir === null ? "" : "、磁盘目录"}）`
+    message: `已彻底删除 ${sessionId}（归档标记、工作区引用${dir === null ? "" : "、磁盘目录"}；直写存储，重启 DSH 后生效）`
   };
 }
 function formatBytes(bytes) {
@@ -284,6 +307,13 @@ const inject = ["tools"];
 const DEFAULT_MAX_ITEMS = 500;
 function apply(ctx, config = {}) {
   const maxItems = config.maxItems ?? DEFAULT_MAX_ITEMS;
+  ctx.inject(["workspaceRegistry"], (ready) => {
+    const registry2 = ready.workspaceRegistry;
+    if (registry2) {
+      setWorkspaceRegistry(registry2);
+      console.info("[dsh-archive-manager] 已接入官方 workspaceRegistry，还原/删除走权威路径");
+    }
+  });
   ctx.inject(["webServer"], (ready) => {
     try {
       registerPanel(ready, { maxItems });

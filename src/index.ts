@@ -1,17 +1,19 @@
 /**
  * dsh-archive-manager：列出、恢复与彻底删除 DSH 归档会话。
  *
- * 之所以直接操作存储而非调用框架 API，是因为 DSH 只暴露了 archiveSession，
- * 没有 unarchive 与删除会话的 API（核对自 packages/workspace/workspace/src）。
- * 详见 archive.ts 顶部说明。
+ * 写入路径（详见 archive.ts 顶部说明）：
+ *   - `workspaceRegistry` 服务就绪后接入官方注册表，取消归档/删除走权威路径，
+ *     界面即时生效（这是主线；早期版本误以为 DSH 没有 unarchive API 才直写文件）。
+ *   - 服务缺席时退回直写 ~/.dsh/storages/workspace.json，改动需重启 DSH 生效。
  *
- * 对外提供两套入口：三个工具（由模型调用）与一个右下角面板（由用户点击），
+ * 对外提供两套入口：三个工具（由模型调用）与一个设置分区面板（由用户点击），
  * 二者共用 archive.ts 的同一套实现。
  *
  * @module dsh-archive-manager
  */
 
-import { formatBytes, listArchived, remove, unarchive } from './archive'
+import { formatBytes, listArchived, remove, setWorkspaceRegistry, unarchive } from './archive'
+import type { WorkspaceRegistryLike } from './archive'
 import { registerPanel } from './panel'
 // 自实现的 defineTool —— 不依赖 @deepseek-ai/dsh-tools，理由见 tool-kit.ts 顶部。
 import { TEXT_OUTPUT, defineTool } from './tool-kit'
@@ -46,6 +48,16 @@ interface HostContext {
 /** 注册三个归档维护工具，并挂载设置分区所需的同源 API。 */
 export function apply(ctx: HostContext, config: Config = {}): void {
   const maxItems = config.maxItems ?? DEFAULT_MAX_ITEMS
+
+  // 官方注册表就绪后接管取消归档/删除；服务缺席（老版宿主）时回调不触发，
+  // archive.ts 保持直写文件回退，工具仍可用。
+  ctx.inject(['workspaceRegistry'], (ready) => {
+    const registry = (ready as Record<string, unknown>).workspaceRegistry as WorkspaceRegistryLike | undefined
+    if (registry) {
+      setWorkspaceRegistry(registry)
+      console.info('[dsh-archive-manager] 已接入官方 workspaceRegistry，还原/删除走权威路径')
+    }
+  })
 
   // 设置分区的数据接口等 webServer 就绪；失败不影响工具本身。
   ctx.inject(['webServer'], (ready) => {

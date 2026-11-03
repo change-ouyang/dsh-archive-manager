@@ -9,6 +9,21 @@
       const { createElement: h, useState, useEffect, useCallback, useMemo, useRef } = React;
       const inject = ["slots"];
       const API = "/api/dsh-archive";
+      let CLIENT_CTX = null;
+      function resolveOfficialUnarchive() {
+        try {
+          const ctx = CLIENT_CTX;
+          const workspaces = ctx && typeof ctx.get === "function" ? ctx.get("workspaces") : null;
+          if (workspaces && typeof workspaces.unarchiveSession === "function") {
+            return (id) => {
+              console.info("[dsh-archive-manager] 恢复走官方 workspace API（即时生效）");
+              return workspaces.unarchiveSession(id);
+            };
+          }
+        } catch {
+        }
+        return null;
+      }
       const CSS = `
       .dar-head { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
       .dar-title { font-size: 15px; font-weight: 600; margin: 0; line-height: 1.35; }
@@ -40,6 +55,26 @@
       .dar-btn.danger:hover:not(:disabled) { background: var(--dsw-alias-danger-fill, rgba(229,72,77,.12)); }
 
       .dar-list { display: flex; flex-direction: column; gap: 6px; }
+
+      /* 根节点撑满设置壳的分区容器：头/搜索/批量条固定，只有列表内滚。 */
+      .dar-root { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+      .dar-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding-right: 2px;
+        scrollbar-width: thin; scrollbar-color: var(--dsw-alias-scrollbar-bg-l2, rgba(127,127,127,.35)) transparent; }
+      .dar-list::-webkit-scrollbar { width: 8px; }
+      .dar-list::-webkit-scrollbar-track { background: transparent; }
+      .dar-list::-webkit-scrollbar-thumb { background: var(--dsw-alias-scrollbar-bg-l2, rgba(127,127,127,.35)); border-radius: 4px; }
+      .dar-list::-webkit-scrollbar-thumb:hover { background: var(--dsw-alias-scrollbar-hover-l2, rgba(127,127,127,.55)); }
+
+      /* 批量操作条：全选 + 批量恢复/删除 + 进度 */
+      .dar-batchbar { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+      .dar-selectall { display: flex; align-items: center; gap: 6px; font-size: 12.5px; opacity: .85;
+        cursor: pointer; user-select: none; padding: 4px 6px; }
+      .dar-selectall:hover { opacity: 1; }
+      .dar-progress { font-size: 12px; opacity: .6; font-variant-numeric: tabular-nums; }
+      .dar-check { display: flex; align-items: center; flex-shrink: 0; cursor: pointer; }
+      .dar-check input { width: 15px; height: 15px; margin: 0; cursor: pointer;
+        accent-color: var(--dsw-alias-primary, #3b82f6); }
+
       .dar-item { display: flex; align-items: center; gap: 12px; padding: 11px 13px; border-radius: 9px;
         border: 1px solid var(--dsw-alias-border-l2, rgba(127,127,127,.18));
         background: var(--dsw-alias-settings-card-fill, rgba(127,127,127,.06)); transition: border-color .14s ease; }
@@ -111,7 +146,8 @@
       function Page() {
         const [state, setState] = useState({ loading: true, error: null, sessions: [], total: 0, onDisk: 0, bytes: 0 });
         const [query, setQuery] = useState("");
-        const [busyId, setBusyId] = useState(null);
+        const [selected, setSelected] = useState([]);
+        const [batch, setBatch] = useState(null);
         const [pending, setPending] = useState(null);
         const load = useCallback(async (silent) => {
           if (!silent) setState((s) => ({ ...s, loading: true, error: null }));
@@ -134,39 +170,79 @@
         useEffect(() => {
           load();
         }, [load]);
-        const runAction = useCallback(async (action, session) => {
+        const runRows = useCallback(async (action, rows) => {
+          if (rows.length === 0) return;
           const verb = action === "remove" ? "彻底删除" : "恢复";
-          setPending(null);
-          setBusyId(session.id);
-          try {
-            await callApi("/" + action, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ id: session.id })
-            });
-            setState((s) => {
-              const rest = s.sessions.filter((x) => x.id !== session.id);
-              const goneBytes = action === "remove" ? session.bytes : 0;
-              return {
+          const official = resolveOfficialUnarchive();
+          setBatch({ done: 0, total: rows.length });
+          let failed = 0;
+          for (const [index, session] of rows.entries()) {
+            try {
+              if (action === "unarchive") {
+                if (official) {
+                  await official(session.id);
+                } else {
+                  await callApi("/unarchive", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ id: session.id })
+                  });
+                }
+              } else {
+                if (official) {
+                  try {
+                    await official(session.id);
+                  } catch (err) {
+                    console.warn("[dsh-archive-manager] 官方摘归档标记失败，交给宿主半身兜底：" + String((err == null ? void 0 : err.message) ?? err));
+                  }
+                }
+                await callApi("/remove", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ id: session.id })
+                });
+              }
+              const goneBytes = action === "remove" && session.onDisk ? session.bytes : 0;
+              setState((s) => ({
                 ...s,
-                sessions: rest,
+                sessions: s.sessions.filter((x) => x.id !== session.id),
                 total: Math.max(0, s.total - 1),
-                onDisk: action === "remove" && session.onDisk ? Math.max(0, s.onDisk - 1) : s.onDisk,
+                onDisk: goneBytes > 0 ? Math.max(0, s.onDisk - 1) : s.onDisk,
                 bytes: Math.max(0, s.bytes - goneBytes)
-              };
-            });
-            void load(true);
-          } catch (err) {
-            console.warn("[dsh-archive-manager] " + verb + "失败：" + String((err == null ? void 0 : err.message) ?? err));
-          } finally {
-            setBusyId(null);
+              }));
+              setSelected((sel) => sel.filter((x) => x !== session.id));
+            } catch (err) {
+              failed++;
+              console.warn("[dsh-archive-manager] " + verb + "失败（" + (session.title || session.id) + "）：" + String((err == null ? void 0 : err.message) ?? err));
+            }
+            setBatch({ done: index + 1, total: rows.length });
           }
+          setBatch(null);
+          if (failed > 0) console.warn("[dsh-archive-manager] " + verb + "批量完成：" + (rows.length - failed) + " 成功 / " + failed + " 失败");
+          void load(true);
         }, [load]);
         const filtered = useMemo(() => {
           const q = query.trim().toLowerCase();
           if (!q) return state.sessions;
           return state.sessions.filter((s) => String(s.title || "").toLowerCase().includes(q) || String(s.workspace || "").toLowerCase().includes(q) || String(s.id || "").toLowerCase().includes(q));
         }, [state.sessions, query]);
+        const selectedRows = useMemo(() => {
+          const set = new Set(selected);
+          return filtered.filter((s) => set.has(s.id));
+        }, [filtered, selected]);
+        const allChecked = filtered.length > 0 && selectedRows.length === filtered.length;
+        const batchLocked = batch !== null;
+        const toggleAll = () => {
+          if (allChecked) {
+            const ids = new Set(filtered.map((s) => s.id));
+            setSelected((sel) => sel.filter((x) => !ids.has(x)));
+          } else {
+            setSelected((sel) => [.../* @__PURE__ */ new Set([...sel, ...filtered.map((s) => s.id)])]);
+          }
+        };
+        const toggleOne = (id) => {
+          setSelected((sel) => sel.includes(id) ? sel.filter((x) => x !== id) : [...sel, id]);
+        };
         if (state.loading) {
           return h(
             React.Fragment,
@@ -190,8 +266,8 @@
           );
         }
         return h(
-          React.Fragment,
-          null,
+          "div",
+          { className: "dar-root" },
           h("style", null, CSS),
           h(
             "div",
@@ -221,6 +297,39 @@
             }),
             h("button", { className: "dar-btn", onClick: () => load() }, "刷新")
           ),
+          filtered.length > 0 ? h(
+            "div",
+            { className: "dar-batchbar" },
+            h(
+              "label",
+              { className: "dar-selectall" },
+              h("input", {
+                type: "checkbox",
+                checked: allChecked,
+                ref: (el) => {
+                  if (el) el.indeterminate = !allChecked && selectedRows.length > 0;
+                },
+                onChange: toggleAll,
+                disabled: batchLocked
+              }),
+              "全选"
+            ),
+            h("button", {
+              className: "dar-btn",
+              disabled: batchLocked || selectedRows.length === 0,
+              onClick: () => runRows("unarchive", selectedRows)
+            }, "批量恢复" + (selectedRows.length > 0 ? " (" + selectedRows.length + ")" : "")),
+            h("button", {
+              className: "dar-btn danger",
+              disabled: batchLocked || selectedRows.length === 0,
+              onClick: () => setPending({ action: "remove", rows: selectedRows })
+            }, "批量删除" + (selectedRows.length > 0 ? " (" + selectedRows.length + ")" : "")),
+            h(
+              "span",
+              { className: "dar-progress" },
+              batch ? "处理中 " + batch.done + "/" + batch.total + "…" : ""
+            )
+          ) : null,
           filtered.length === 0 ? h(
             "div",
             { className: "dar-empty" },
@@ -237,6 +346,16 @@
             filtered.map((s) => h(
               "div",
               { className: "dar-item", key: s.id },
+              h(
+                "label",
+                { className: "dar-check" },
+                h("input", {
+                  type: "checkbox",
+                  checked: selected.includes(s.id),
+                  onChange: () => toggleOne(s.id),
+                  disabled: batchLocked
+                })
+              ),
               h(
                 "div",
                 { className: "dar-meta" },
@@ -256,13 +375,13 @@
                 { className: "dar-act" },
                 h("button", {
                   className: "dar-btn",
-                  disabled: busyId === s.id,
-                  onClick: () => setPending({ action: "unarchive", session: s })
-                }, busyId === s.id ? "处理中…" : "恢复"),
+                  disabled: batchLocked,
+                  onClick: () => setPending({ action: "unarchive", rows: [s] })
+                }, "恢复"),
                 h("button", {
                   className: "dar-btn danger",
-                  disabled: busyId === s.id,
-                  onClick: () => setPending({ action: "remove", session: s })
+                  disabled: batchLocked,
+                  onClick: () => setPending({ action: "remove", rows: [s] })
                 }, "删除")
               )
             ))
@@ -270,20 +389,20 @@
           h(
             "div",
             { className: "dar-foot" },
-            state.total > 0 ? "显示 " + filtered.length + " / " + state.total + " 条归档会话" : ""
+            state.total > 0 ? "显示 " + filtered.length + " / " + state.total + " 条归档会话" + (selected.length > 0 ? " · 已选 " + selected.length + " 条" : "") : ""
           ),
           pending ? h(ConfirmDialog, {
             action: pending.action,
-            session: pending.session,
-            busy: busyId === pending.session.id,
+            rows: pending.rows,
+            busy: batchLocked,
             onCancel: () => setPending(null),
-            onConfirm: () => runAction(pending.action, pending.session)
+            onConfirm: () => runRows(pending.action, pending.rows)
           }) : null
         );
       }
       function ConfirmDialog(props) {
         const isRemove = props.action === "remove";
-        const title = props.session.title || "未命名会话";
+        const label = props.rows.length === 1 ? "「" + (props.rows[0].title || "未命名会话") + "」" : props.rows.length + " 条会话";
         const cancelRef = useRef(null);
         const confirmRef = useRef(null);
         useEffect(() => {
@@ -309,8 +428,8 @@
           h(
             "div",
             { className: "dar-modal", role: "dialog", "aria-modal": "true" },
-            h("h4", null, (isRemove ? "彻底删除" : "恢复") + "「" + title + "」？"),
-            h("p", null, isRemove ? "这条会话会从归档集合、所属工作区引用以及磁盘上一并移除。" : "它会回到会话列表里原来的位置。"),
+            h("h4", null, (isRemove ? "彻底删除" : "恢复") + label + "？"),
+            h("p", null, isRemove ? (props.rows.length === 1 ? "这条会话" : "这 " + props.rows.length + " 条会话") + "会从归档集合、所属工作区引用以及磁盘上一并移除。" : (props.rows.length === 1 ? "它会" : "它们会") + "回到会话列表里原来的位置。"),
             h("p", { className: isRemove ? "dar-warn" : null }, isRemove ? "删除后无法撤销，会话文件不会被备份。" : "会话文件不会被改动。"),
             h(
               "div",
@@ -332,6 +451,7 @@
         );
       }
       function apply(ctx) {
+        CLIENT_CTX = ctx;
         ctx.slots.inject("settings.section", () => ctx.slots.register({
           name: "settings.section",
           id: "dsh-archive",

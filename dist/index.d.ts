@@ -1,11 +1,12 @@
 /**
  * dsh-archive-manager：列出、恢复与彻底删除 DSH 归档会话。
  *
- * 之所以直接操作存储而非调用框架 API，是因为 DSH 只暴露了 archiveSession，
- * 没有 unarchive 与删除会话的 API（核对自 packages/workspace/workspace/src）。
- * 详见 archive.ts 顶部说明。
+ * 写入路径（详见 archive.ts 顶部说明）：
+ *   - `workspaceRegistry` 服务就绪后接入官方注册表，取消归档/删除走权威路径，
+ *     界面即时生效（这是主线；早期版本误以为 DSH 没有 unarchive API 才直写文件）。
+ *   - 服务缺席时退回直写 ~/.dsh/storages/workspace.json，改动需重启 DSH 生效。
  *
- * 对外提供两套入口：三个工具（由模型调用）与一个右下角面板（由用户点击），
+ * 对外提供两套入口：三个工具（由模型调用）与一个设置分区面板（由用户点击），
  * 二者共用 archive.ts 的同一套实现。
  *
  * @module dsh-archive-manager

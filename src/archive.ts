@@ -1,17 +1,24 @@
 /**
  * 归档会话的查询与维护操作。
  *
- * DSH 的真实归档机制（核对自 packages/workspace/workspace/src/spec.ts）：
+ * DSH 的真实归档机制（核对自 @deepseek-ai/dsh-workspace 编译产物）：
  *   - 归档集合是 workspace 域全局状态里的 `archivedSessionIds: SessionId[]`，
  *     持久化在 ~/.dsh/storages/workspace.json 的 `global` 段。
  *   - 归档**不移动、不删除**任何会话文件；会话磁盘目录保持原样，
  *     仅靠该集合把会话从各列表与分组界面过滤掉。
  *   - 归档后 `sessionIds` 槽位保留，因此恢复时位置自动回到原处。
  *
- * 关键限制（已核对源码）：DSH 只暴露 `workspaces.archiveSession(id)`，
- * 既没有 unarchive API，也没有删除单个会话的 API。因此本模块：
- *   - 恢复 = 从 archivedSessionIds 移除（等价于框架注释中的 "unarchiving"）。
- *   - 删除 = 摘除归档标记与工作区引用，并删除磁盘会话目录（不可逆）。
+ * 两条写入路径（见 setWorkspaceRegistry）：
+ *   - **官方路径**（registry 可用时）：workspaceRegistry.unarchiveSession(id)
+ *     与实体 detachSession(id) 幂等、写通内存 + 落盘 + GUI 投影事件，
+ *     还原立即在界面上生效。
+ *   - **回退路径**（直写文件）：宿主内存是权威、只在启动时读取一次该文件，
+ *     也没有跨进程变更推送（storage-domain 已知限制），所以直写的改动
+ *     要重启 DSH 才可见，且重启前宿主的任何工作区写入都会把它覆盖回去。
+ *     仅作 registry 缺席时的兜底。
+ *
+ *   - 删除 = 摘除归档标记与工作区记账槽，并删除磁盘会话目录（不可逆）；
+ *     DSH 没有「删除会话」的官方 API，记账槽的摘除复用 detachSession。
  */
 
 import { readFile, writeFile, rename, rm, readdir, stat } from 'node:fs/promises'
@@ -43,6 +50,29 @@ interface WorkspaceStore {
     pinnedSessionIds?: string[]
   }
   tables: { workspaces: Record<string, WorkspaceRecord> }
+}
+
+/** 官方 Workspace 实体的最小切面（detachSession 幂等，非属主为无害空操作）。 */
+export interface WorkspaceEntityLike {
+  detachSession(sessionId: string): Promise<unknown>
+}
+
+/** 官方 workspaceRegistry 服务的最小切面（@deepseek-ai/dsh-workspace）。 */
+export interface WorkspaceRegistryLike {
+  /** registry 全局归档集合（内存权威值，同步读取）。 */
+  readonly archivedSessionIds: readonly string[]
+  unarchiveSession(sessionId: string): Promise<unknown>
+  list(): readonly WorkspaceEntityLike[]
+}
+
+/**
+ * 宿主注入的官方注册表；index.ts 在 `workspaceRegistry` 服务就绪时接线。
+ * 置位后取消归档/删除走权威路径，未置位时退回直写文件。
+ */
+let registry: WorkspaceRegistryLike | null = null
+
+export function setWorkspaceRegistry(value: WorkspaceRegistryLike | null): void {
+  registry = value
 }
 
 /** 一条归档会话的可读投影。 */
@@ -208,21 +238,43 @@ export async function listArchived(maxItems: number): Promise<ArchivedSession[]>
   return out
 }
 
-/** 取消归档：仅从集合移除，磁盘与会话内容完全不动。 */
+/** 取消归档：仅从归档集合移除，磁盘与会话内容完全不动。 */
 export async function unarchive(sessionId: string): Promise<{ ok: boolean; message: string }> {
+  if (registry !== null) {
+    if (!registry.archivedSessionIds.includes(sessionId)) {
+      return { ok: false, message: `会话 ${sessionId} 不在归档集合中` }
+    }
+    await registry.unarchiveSession(sessionId)
+    return { ok: true, message: `已取消归档 ${sessionId}；侧栏会话列表即时生效` }
+  }
+  // 回退：直写存储文件。宿主内存权威且不重读该文件，改动要重启 DSH 才可见。
   const store = await readStore()
   if (!store.global.archivedSessionIds.includes(sessionId)) {
     return { ok: false, message: `会话 ${sessionId} 不在归档集合中` }
   }
   store.global.archivedSessionIds = store.global.archivedSessionIds.filter(id => id !== sessionId)
   await writeStore(store)
-  return { ok: true, message: `已取消归档 ${sessionId}；会话文件未被改动` }
+  return { ok: true, message: `已取消归档 ${sessionId}（直写存储，重启 DSH 后生效）；会话文件未被改动` }
 }
 
-/** 彻底删除：摘除归档标记与工作区引用，再删磁盘目录。 */
+/** 彻底删除：摘除归档标记与工作区记账槽，再删磁盘目录。 */
 export async function remove(sessionId: string): Promise<{ ok: boolean; message: string }> {
-  const store = await readStore()
   const { dir } = await locate(sessionId)
+  if (registry !== null) {
+    if (!registry.archivedSessionIds.includes(sessionId) && dir === null) {
+      return { ok: false, message: `会话 ${sessionId} 既不在归档集合中，磁盘上也没有它的目录` }
+    }
+    await registry.unarchiveSession(sessionId)
+    // detachSession 幂等：非属主工作区是无害空操作，逐个调用即完成全局摘除。
+    for (const entity of registry.list()) await entity.detachSession(sessionId)
+    if (dir !== null) await rm(dir, { recursive: true, force: true })
+    return {
+      ok: true,
+      message: `已彻底删除 ${sessionId}（归档标记、工作区引用${dir === null ? '' : '、磁盘目录'}）`,
+    }
+  }
+  // 回退：直写存储文件 + 删目录（同 unarchive 回退路径的重启才可见问题）。
+  const store = await readStore()
   const archived = store.global.archivedSessionIds.includes(sessionId)
   if (!archived && dir === null) {
     return { ok: false, message: `会话 ${sessionId} 既不在归档集合中，磁盘上也没有它的目录` }
@@ -235,7 +287,7 @@ export async function remove(sessionId: string): Promise<{ ok: boolean; message:
   if (dir !== null) await rm(dir, { recursive: true, force: true })
   return {
     ok: true,
-    message: `已彻底删除 ${sessionId}（归档标记、工作区引用${dir === null ? '' : '、磁盘目录'}）`,
+    message: `已彻底删除 ${sessionId}（归档标记、工作区引用${dir === null ? '' : '、磁盘目录'}；直写存储，重启 DSH 后生效）`,
   }
 }
 
